@@ -8,7 +8,11 @@ import time
 import os
 import sys
 import string
+import subprocess
+import random
 
+PWD = os.getcwd()
+TEMPER1 = '/temper1/temper'
 CONFIG_FILE = os.environ['HOME'] + '/dognanny.rc'
 INTERVAL = 30 # 30s
 ADMIN = u'豆芽小约'
@@ -79,9 +83,24 @@ def msg_analysis(msg, nanny):
     return (msg['id'], name, cmd)
 
 def cmd_poll(client, executor, msgid):
-    # take instant temperature
     # take picture from camera
+    # take instant temperature
+    temper = ''
+    temper1 = PWD + TEMPER1
+    logging.debug("exec temper1: %s", temper1)
+    try:
+        temper = subprocess.check_output(temper1, shell=True)
+    except subprocess.CalledProcessError as e:
+        logging.debug("exec temper1 error:%s" % e.output)
+    if len(temper) is not 0:
+        temper = temper.strip('\n')
+        logging.debug("get current temperature:%s", temper)
     # send one weibo message with pic & @sender
+    message = u"豆芽房间目前温度：{temper}℃  -- {time} {at}".format(
+                        temper=temper,
+                        time=time.strftime("%H:%M", time.localtime()),
+                        at=u''.join(executor))
+    client.statuses.update.post(status=message)
 
     return 'ok'
 
@@ -100,8 +119,12 @@ def cmd_acoff(client, executor, msgid):
     return ret
 
 def cmd_kill(client, executor, msgid):
-    logging.info("kill myself on order of {0}".format(*executor))
+    logging.info("kill myself on order of {0}".format(u''.join(executor)))
     return 'ok'
+
+def cmd_ping(client, executor, msgid):
+    logging.debug("%s is pinging me" % executor)
+    client.comments.create.post(comment=u"I'm alive %f" % random.random(), id=msgid)
 
 # commands description and handler
 cmds_desc = {
@@ -121,6 +144,10 @@ cmds_desc = {
              'pattern': u'你可以下岗了',
              'desc': u'kill myself',
              'handler': cmd_kill },
+    'ping' : {
+             'pattern': u'ping',
+             'desc': u'debug ping',
+             'handler': cmd_ping },
 }
 
 def main():
@@ -167,13 +194,12 @@ def main():
     get_emotions = client.emotions.get()
     for emotion in get_emotions:
         emotions.append(emotion['phrase'])
-    logging.debug("Get emotions {0}".format(emotions))
 
     # update last id, drop the expired command message
     msg = client.statuses.mentions.get(filter_by_author='1', trim_user='1', since_id=since_id)
     get_statuses = msg.__getattr__('statuses')
-    if (len(get_statuses) > 0) and get_statuses[0].has_key('id'):
-        since_id = get_statuses[0]['id']
+    #if (len(get_statuses) > 0) and get_statuses[0].has_key('id'):
+    #    since_id = get_statuses[0]['id']
     logging.debug("Start to get command message from id:%s" % since_id)
 
     # main loop
@@ -212,14 +238,20 @@ def main():
                 logging.debug("no prividge for %s to do %s" % (args, cmd))
                 continue
 
+            if cmd is 'ping':
+                cmds_desc['ping']['handler'](client, args, msgid)
+                continue
+
             if cmd_queue.has_key(cmd):
-                if not args in cmd_queue[cmd]:
-                    cmd_queue[cmd].append(u'@' + args)
+                atwho = u'@' + args
+                if not atwho in cmd_queue[cmd]:
+                    cmd_queue[cmd].append(atwho)
             else:
                 cmd_queue[cmd] = [u'@' + args, ]
 
 	if tmp_id == since_id or len(cmd_queue) == 0:
             logging.debug("on message handle this cycle")
+            since_id = tmp_id
             time.sleep(INTERVAL)
             continue
 
@@ -227,7 +259,7 @@ def main():
         # execute commands after queueing msg
         if len(cmd_queue) > 0:
             for key, value in cmd_queue.items():
-                logging.debug(u"execute cmd:{0} for {1}".format(key, *value))
+                logging.debug(u"execute cmd:{0} for {1}".format(key, u''.join(value)))
                 ret = cmds_desc[key]['handler'](client, value, msgid)
 
         cmd_queue.clear()
@@ -242,6 +274,7 @@ if __name__ == '__main__':
                         filename='/tmp/dognanny.log',
                         filemode='w')
 
+    logging.info("Current working dir is: %s", PWD)
     # make it daemon
     try:
         pid = os.fork()
