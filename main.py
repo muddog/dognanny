@@ -7,17 +7,13 @@ import logging
 import time
 import os
 import sys
+import string
 
 CONFIG_FILE = os.environ['HOME'] + '/dognanny.rc'
-INTERVAL = 60 # 30s
+INTERVAL = 30 # 30s
 ADMIN = u'豆芽小约'
-CMDS_PATTERN = {
-    'poll' : u'豆芽怎么样了',
-    'acon' : u'请开空调',
-    'acoff' : u'请关空调',
-    'kill' : u'你可以下岗了',
-}
 
+# read app key/secret and weibo account/passwd from file
 def read_config():
 
     appinfo = {'key':'', 'secret':''}
@@ -25,7 +21,6 @@ def read_config():
     callback_url = ''
 
     logging.info("openning the configure file: %s" % CONFIG_FILE)
-    # read app key/secret and weibo account/passwd from file
     try:
         accfd = open(CONFIG_FILE, 'r')
         lines = accfd.readlines()
@@ -59,13 +54,7 @@ def get_oauth2_code(app, acc, cb_url, au_url):
     return code
 
 # analysis the @ message
-# return:
-#       (time, id, sender_name, cmd)
-# commands:
-#       "@nanny 豆芽怎么样了" return temperature and picture
-#       "@nanny 请开空调" turn on the air condition
-#       "@nanny 请关空调" turn off the air condition
-#       "@nanny 你可以下岗了" kill self
+# return: (id, sender_name, cmd)
 def msg_analysis(msg, nanny):
     date = msg['created_at']
     text = msg['text']
@@ -73,18 +62,66 @@ def msg_analysis(msg, nanny):
     msgid = msg['id']
     cmd = ''
 
-    for key, patt in CMDS_PATTERN.items():
-        m = re.match(u'@(\w+) (\w+)', text)
+    pair = re.compile(r"@(\w+) (\w+)", re.U)
+
+    for key, desc in cmds_desc.items():
+        m = pair.match(text)
         if m is not None:
 	    if m.group(1) != nanny:
-                break
-            if m.group(2) == patt:
+                logging.warning("%s has send a wrong msg on %s" % (m.group(1), date))
+                return (t, 0, '', '')
+            idx = string.find(m.group(2), desc['pattern'])
+            if idx == 0:
                 cmd = key
                 break
 
-    t = time.strptime(date, "%a %b %d %H:%M:%S +0800 %Y")
-    logging.debug("Parser command(%s): [%s]: (%s) by %s" % (date, cmd, text, name))
-    return (t, msg['id'], name, cmd)
+    logging.debug("return command(%s): [%s]: (%s) by %s" % (date, cmd, text, name))
+    return (msg['id'], name, cmd)
+
+def cmd_poll(client, executor, msgid):
+    # take instant temperature
+    # take picture from camera
+    # send one weibo message with pic & @sender
+
+    return 'ok'
+
+def cmd_ac(on):
+    # if there's ac control command
+    # send ac ctrl command
+    # reply to the command weibo message
+    return 'ok'
+
+def cmd_acon(client, executor, msgid):
+    ret = cmd_ac(True)
+    return ret
+
+def cmd_acoff(client, executor, msgid):
+    ret = cmd_ac(False)
+    return ret
+
+def cmd_kill(client, executor, msgid):
+    logging.info("kill myself on order of {0}".format(*executor))
+    return 'ok'
+
+# commands description and handler
+cmds_desc = {
+    'poll' : {
+             'pattern': u'豆芽怎么样了',
+             'desc': u'poll the status',
+             'handler': cmd_poll },
+    'acon' : {
+             'pattern': u'请开空调',
+             'desc': u'turn on ac',
+             'handler': cmd_acon },
+    'acoff': {
+             'pattern': u'请关空调',
+             'desc': u'turn off ac',
+             'handler': cmd_acoff },
+    'kill' : {
+             'pattern': u'你可以下岗了',
+             'desc': u'kill myself',
+             'handler': cmd_kill },
+}
 
 def main():
 
@@ -124,10 +161,33 @@ def main():
     # initilized the since_id
     since_id = 0
 
+    # get emotions
+    emotions = []
+    emotion_id = 0
+    get_emotions = client.emotions.get()
+    for emotion in get_emotions:
+        emotions.append(emotion['phrase'])
+    logging.debug("Get emotions {0}".format(emotions))
+
+    # update last id, drop the expired command message
+    msg = client.statuses.mentions.get(filter_by_author='1', trim_user='1', since_id=since_id)
+    get_statuses = msg.__getattr__('statuses')
+    if (len(get_statuses) > 0) and get_statuses[0].has_key('id'):
+        since_id = get_statuses[0]['id']
+    logging.debug("Start to get command message from id:%s" % since_id)
+
+    # main loop
     while True:
         now = time.time()
 	tmp_id = since_id
 	cmd_queue = {}
+
+        # debug to get rate limit status
+        msg = client.account.rate_limit_status.get()
+        if msg.has_key('api_rate_limits'):
+            del msg['api_rate_limits']
+        logging.debug("Get rate limit:{0}".format(msg))
+
         # get the lastest @ message by since_id
 	logging.debug("Get mentions by since_id:%d" % since_id)
         msg = client.statuses.mentions.get(filter_by_author='1', trim_user='1', since_id=since_id)
@@ -135,46 +195,44 @@ def main():
 	for msg in get_statuses:
             # filter for commands
             # Analysis the message sender, put in list
-            (t, msgid, args, cmd) = msg_analysis(msg, nanny_name)
-            # if the message parsed error
-	    if msgid == 0:
-                continue
+            (msgid, args, cmd) = msg_analysis(msg, nanny_name)
 
-            delta = now - time.mktime(t)
-            # should be the first time running ?
-	    if delta > 2*INTERVAL:
-                since_id = msg['id']
-                break # should sleep and continue
-            if cmd is not '':
-                cmd_queue[cmd].append(args)
-            else:
-		logging.warning("{0} has send a wrong msg on {1}".format(args, t))
             if tmp_id < msgid:
                 tmp_id = msgid
+            # if the message parsed error
+	    if msgid == 0 or cmd == '':
+                continue
+
+            # filter the commands sent by non admin
+            if (cmd is not 'poll') and (args != ADMIN):
+                # comment the message
+                deny_comment = u"貌似您不是豆芽主人唉%s" % (emotions[emotion_id])
+                client.comments.create.post(id=msgid, comment=deny_comment)
+                emotion_id = (emotion_id + 1) % len(emotions)
+                logging.debug("no prividge for %s to do %s" % (args, cmd))
+                continue
+
+            if cmd_queue.has_key(cmd):
+                if not args in cmd_queue[cmd]:
+                    cmd_queue[cmd].append(u'@' + args)
+            else:
+                cmd_queue[cmd] = [u'@' + args, ]
 
 	if tmp_id == since_id or len(cmd_queue) == 0:
             logging.debug("on message handle this cycle")
+            time.sleep(INTERVAL)
             continue
 
+        # TODO: save the acon/off, kill lastest message id for response
         # execute commands after queueing msg
-        if 'poll' in cmd_queue:
-            logging.debug("sending poll response to {0}".format(cmd_queue['poll']))
-        if 'acon' in cmd_queue:
-            logging.debug("turn on ac for {0}".format(cmd_queue['acon']))
-        if 'acoff' in cmd_queue:
-            logging.debug("turn off ac for {0}".format(cmd_queue['acoff']))
-        if 'kill' in cmd_queue:
-            logging.debug("kill myself for {0}".format(cmd_queue['kill']))
-        # if there's query command
-        # take instant temperature
-        # take picture from camera
-        # send one weibo message with pic & @sender
+        if len(cmd_queue) > 0:
+            for key, value in cmd_queue.items():
+                logging.debug(u"execute cmd:{0} for {1}".format(key, *value))
+                ret = cmds_desc[key]['handler'](client, value, msgid)
 
-        # if there's ac control command
-        # send ac ctrl command
-        # reply to the command weibo message
+        cmd_queue.clear()
         since_id = tmp_id
-	time.sleep(INTERVAL - 2)
+        time.sleep(INTERVAL)
 
 
 if __name__ == '__main__':
