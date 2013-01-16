@@ -1,8 +1,8 @@
 # coding: utf-8
-from weibo import APIClient
+from weibo import APIClient, APIError
 from re import split
 import re
-import urllib,httplib
+import urllib,httplib,urllib2
 import logging
 import time
 import os
@@ -11,11 +11,12 @@ import string
 import subprocess
 import random
 
-PWD = os.getcwd()
-TEMPER1 = '/temper1/temper'
+WORKDIR = os.getcwd()
+TEMPER1 = WORKDIR + '/temper1/temper'
+CAPTURE = WORKDIR + '/capture.py'
+AC_CONTROL = WORKDIR + '/ac-controller/ac-ctrl'
 CONFIG_FILE = os.environ['HOME'] + '/dognanny.rc'
 INTERVAL = 30 # 30s
-ADMIN = u'豆芽小约'
 
 # read app key/secret and weibo account/passwd from file
 def read_config():
@@ -23,17 +24,19 @@ def read_config():
     appinfo = {'key':'', 'secret':''}
     account = {'id':'', 'passwd':''}
     callback_url = ''
+    admin = ''
 
     logging.info("openning the configure file: %s" % CONFIG_FILE)
     try:
         accfd = open(CONFIG_FILE, 'r')
         lines = accfd.readlines()
-        if len(lines) is 5:
+        if len(lines) is 6:
             appinfo['key'] = lines[0].strip('\n')
             appinfo['secret'] = lines[1].strip('\n')
             account['id'] = lines[2].strip('\n')
             account['passwd'] = lines[3].strip('\n')
             callback_url = lines[4].strip('\n')
+            admin = unicode(lines[5].strip('\n'), 'utf8')
         else:
             accfd.close()
 	    logging.error("Content of config file error")
@@ -43,7 +46,7 @@ def read_config():
         logging.error("Cannot read config file %s" % e.strerror)
         sys.exit(1)
 
-    return (appinfo, account, callback_url)
+    return (appinfo, account, callback_url, admin)
 
 #for getting the code contained in the callback url
 def get_oauth2_code(app, acc, cb_url, au_url):
@@ -66,7 +69,7 @@ def msg_analysis(msg, nanny):
     msgid = msg['id']
     cmd = ''
 
-    pair = re.compile(r"@(\w+) (\w+)", re.U)
+    pair = re.compile(r"@(\w+) (\w+).*", re.U)
 
     for key, desc in cmds_desc.items():
         m = pair.match(text)
@@ -83,26 +86,47 @@ def msg_analysis(msg, nanny):
     return (msg['id'], name, cmd)
 
 def cmd_poll(client, executor, msgid):
+
     # take picture from camera
+    try:
+        cmdline = "python %s %s" % (CAPTURE, WORKDIR)
+        imgfile_path = subprocess.check_output(cmdline , shell=True)
+    except subprocess.CalledProcessError as e:
+        logging.error("exec capture.py error:%s" % e.output)
+
+    logging.debug("Get the captured file:%s" % imgfile_path)
+
     # take instant temperature
     temper = ''
-    temper1 = PWD + TEMPER1
-    logging.debug("exec temper1: %s", temper1)
     try:
-        temper = subprocess.check_output(temper1, shell=True)
+        temper = subprocess.check_output(TEMPER1, shell=True)
     except subprocess.CalledProcessError as e:
-        logging.debug("exec temper1 error:%s" % e.output)
+        logging.error("exec temper1 error:%s" % e.output)
+
+    logging.debug("run temper1 to get temperature:%s" % temper)
     if len(temper) is not 0:
         temper = temper.strip('\n')
-        logging.debug("get current temperature:%s", temper)
+        try:
+            temper_float = float(temper)
+            logging.debug("get current temperature:%s", temper)
+        except ValueError as e:
+            temper = u'N/A'
+    else:
+        temper = u'N/A'
+
     # send one weibo message with pic & @sender
     message = u"豆芽房间目前温度：{temper}℃  -- {time} {at}".format(
                         temper=temper,
                         time=time.strftime("%H:%M", time.localtime()),
                         at=u''.join(executor))
-    client.statuses.update.post(status=message)
-
-    return 'ok'
+    if imgfile_path is '':
+        client.post.statuses__update(status=message)
+    else:
+        try:
+            imgfile = open(imgfile_path.strip('\n'))
+            client.upload.statuses__upload(status=message, pic=imgfile)
+        except IOError as e:
+            client.post.statuses__update(status=message + u' 摄像头故障。。')
 
 def cmd_ac(on):
     # if there's ac control command
@@ -124,7 +148,7 @@ def cmd_kill(client, executor, msgid):
 
 def cmd_ping(client, executor, msgid):
     logging.debug("%s is pinging me" % executor)
-    client.comments.create.post(comment=u"I'm alive %f" % random.random(), id=msgid)
+    client.post.comments__create(comment=u"I'm alive %f" % random.random(), id=msgid)
 
 # commands description and handler
 cmds_desc = {
@@ -153,10 +177,11 @@ cmds_desc = {
 def main():
 
     # read the appinfo and account info from file
-    (appinfo, account, callback_url) = read_config()
+    (appinfo, account, callback_url, admin) = read_config()
     logging.info("Get app info: {0}".format(appinfo))
     logging.info("Get account info: {0}".format(account))
     logging.info("Get callback URL: {0}".format(callback_url))
+    logging.info(u"Get Admin account: {0}".format(admin))
 
     # getting the authorize url
     client = APIClient(app_key=appinfo['key'], app_secret=appinfo['secret'], redirect_uri=callback_url)
@@ -172,12 +197,12 @@ def main():
     client.set_access_token(r.access_token, r.expires_in)
 
     # get nanny user id, then the name
-    msg = client.account.get_uid.get()
+    msg = client.get.account__get_uid()
     nanny_uid = msg.__getattr__('uid')
     if nanny_uid == 0:
         logging.error("Cannot get the nanny account uid")
         sys.exit(1)
-    msg = client.users.show.get(uid=nanny_uid)
+    msg = client.get.users__show(uid=nanny_uid)
     nanny_name = msg.__getattr__('screen_name')
     if len(nanny_name) == 0:
         logging.error("Cannot get the nanny account screen name:%d" % nanny_uid)
@@ -191,15 +216,15 @@ def main():
     # get emotions
     emotions = []
     emotion_id = 0
-    get_emotions = client.emotions.get()
+    get_emotions = client.get.emotions()
     for emotion in get_emotions:
         emotions.append(emotion['phrase'])
 
     # update last id, drop the expired command message
-    msg = client.statuses.mentions.get(filter_by_author='1', trim_user='1', since_id=since_id)
+    msg = client.get.statuses__mentions(filter_by_author='1', trim_user='1', since_id=since_id)
     get_statuses = msg.__getattr__('statuses')
-    #if (len(get_statuses) > 0) and get_statuses[0].has_key('id'):
-    #    since_id = get_statuses[0]['id']
+    if (len(get_statuses) > 0) and get_statuses[0].has_key('id'):
+        since_id = get_statuses[0]['id']
     logging.debug("Start to get command message from id:%s" % since_id)
 
     # main loop
@@ -209,15 +234,29 @@ def main():
 	cmd_queue = {}
 
         # debug to get rate limit status
-        msg = client.account.rate_limit_status.get()
+        while True:
+            try:
+                msg = client.get.account__rate_limit_status()
+            except (urllib2.URLError, httplib.BadStatusLine) as e:
+                logging.error("Get rate limit error: {0}".format(e))
+                continue
+            break
+
         if msg.has_key('api_rate_limits'):
             del msg['api_rate_limits']
         logging.debug("Get rate limit:{0}".format(msg))
 
         # get the lastest @ message by since_id
 	logging.debug("Get mentions by since_id:%d" % since_id)
-        msg = client.statuses.mentions.get(filter_by_author='1', trim_user='1', since_id=since_id)
+        while True:
+            try:
+                msg = client.get.statuses__mentions(filter_by_author='1', trim_user='1', since_id=since_id)
+            except (urllib2.URLError, httplib.BadStatusLine) as e:
+                logging.error("Get mentions error: {0}".format(e))
+                continue
+            break
         get_statuses = msg.__getattr__('statuses')
+
 	for msg in get_statuses:
             # filter for commands
             # Analysis the message sender, put in list
@@ -230,18 +269,20 @@ def main():
                 continue
 
             # filter the commands sent by non admin
-            if (cmd is not 'poll') and (args != ADMIN):
+            if (cmd is not 'poll') and (args != admin):
                 # comment the message
                 deny_comment = u"貌似您不是豆芽主人唉%s" % (emotions[emotion_id])
-                client.comments.create.post(id=msgid, comment=deny_comment)
+                client.post.comments__create(id=msgid, comment=deny_comment)
                 emotion_id = (emotion_id + 1) % len(emotions)
                 logging.debug("no prividge for %s to do %s" % (args, cmd))
                 continue
 
+            # handle ping command separately
             if cmd is 'ping':
                 cmds_desc['ping']['handler'](client, args, msgid)
                 continue
 
+            # TODO:queue the command, and combine same requests
             if cmd_queue.has_key(cmd):
                 atwho = u'@' + args
                 if not atwho in cmd_queue[cmd]:
@@ -249,6 +290,7 @@ def main():
             else:
                 cmd_queue[cmd] = [u'@' + args, ]
 
+        # if there's no new message or command, sleep
 	if tmp_id == since_id or len(cmd_queue) == 0:
             logging.debug("on message handle this cycle")
             since_id = tmp_id
@@ -269,12 +311,12 @@ def main():
 
 if __name__ == '__main__':
     # setup the logging
-    logging.basicConfig(level=logging.DEBUG,
-                        format='%(asctime)s %(levelname)s %(message)s',
-                        filename='/tmp/dognanny.log',
-                        filemode='w')
+    logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s %(levelname)s %(message)s',
+            filename='/tmp/dognanny.log',
+            filemode='w')
 
-    logging.info("Current working dir is: %s", PWD)
     # make it daemon
     try:
         pid = os.fork()
@@ -297,4 +339,5 @@ if __name__ == '__main__':
         logging.error("fork #2 failed: %d (%s)" % (e.errno, e.strerror))
         sys.exit(1)
 
+    # run main loop
     main()
