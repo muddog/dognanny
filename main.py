@@ -17,6 +17,7 @@ CAPTURE = WORKDIR + '/capture.py'
 AC_CONTROL = WORKDIR + '/ac-controller/ac-ctrl'
 CONFIG_FILE = os.environ['HOME'] + '/dognanny.rc'
 INTERVAL = 30 # 30s
+RESOLUTION = '1280x720'
 
 # read app key/secret and weibo account/passwd from file
 def read_config():
@@ -64,7 +65,7 @@ def get_oauth2_code(app, acc, cb_url, au_url):
 # return: (id, sender_name, cmd)
 def msg_analysis(msg, nanny):
     date = msg['created_at']
-    text = msg['text']
+    text = msg['text'].strip()
     name = msg['user']['name']
     msgid = msg['id']
     cmd = ''
@@ -88,12 +89,17 @@ def msg_analysis(msg, nanny):
 def cmd_poll(client, executor, msgid):
 
     # take picture from camera
+    now = time.time()
+    imgfile_path = WORKDIR + "/shot.jpg"
     try:
-        cmdline = "python %s %s" % (CAPTURE, WORKDIR)
-        imgfile_path = subprocess.check_output(cmdline , shell=True)
+        cmdline = "fswebcam -r %s -q -D 0.5 %s" % (RESOLUTION, imgfile_path)
+        subprocess.check_call(cmdline , shell=True)
     except subprocess.CalledProcessError as e:
         logging.error("exec capture.py error:%s" % e.output)
 
+    statinfo = os.stat(imgfile_path)
+    if statinfo.st_ctime < now:
+        imgfile_path = ''
     logging.debug("Get the captured file:%s" % imgfile_path)
 
     # take instant temperature
