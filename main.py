@@ -1,4 +1,5 @@
 # coding: utf-8
+# Author: muddogxp@gmail.com
 from weibo import APIClient, APIError
 from re import split
 import re
