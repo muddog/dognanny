@@ -126,7 +126,7 @@ def cmd_poll(client, executor, msgid):
     message = u"豆芽房间当前温度：{temper}℃  -- {time} {at}".format(
                         temper=temper,
                         time=time.strftime("%H点%M分", time.localtime()).decode('utf8'),
-                        at=u''.join(executor))
+                        at=u' '.join(executor))
     if imgfile_path is '':
         client.post.statuses__update(status=message)
     else:
@@ -171,7 +171,9 @@ def cmd_acoff(client, executor, msgid):
         logging.error("reply ac off command error: {0}".format(e))
 
 def cmd_kill(client, executor, msgid):
-    logging.info(u"kill myself on order of {0}".format(u''.join(executor)))
+    logging.info(u"kill myself on order of {0}".format(' '.join(executor)))
+    client.post.statuses__update(status=u'下班咯[太开心]' + u' '.join(executor))
+    sys.exit(0)
 
 def cmd_ping(client, executor, msgid):
     logging.debug("%s is pinging me" % executor)
@@ -192,7 +194,7 @@ cmds_desc = {
              'desc': u'turn off ac',
              'handler': cmd_acoff },
     'kill' : {
-             'pattern': u'下岗吧',
+             'pattern': u'下班吧',
              'desc': u'kill myself',
              'handler': cmd_kill },
     'ping' : {
