@@ -26,7 +26,7 @@ def read_config():
     appinfo = {'key':'', 'secret':''}
     account = {'id':'', 'passwd':''}
     callback_url = ''
-    admin = ''
+    admins = []
 
     logging.info("openning the configure file: %s" % CONFIG_FILE)
     try:
@@ -39,6 +39,7 @@ def read_config():
             account['passwd'] = lines[3].strip('\n')
             callback_url = lines[4].strip('\n')
             admin = unicode(lines[5].strip('\n'), 'utf8')
+            admins = admin.split()
         else:
             accfd.close()
 	    logging.error("Content of config file error")
@@ -48,7 +49,7 @@ def read_config():
         logging.error("Cannot read config file %s" % e.strerror)
         sys.exit(1)
 
-    return (appinfo, account, callback_url, admin)
+    return (appinfo, account, callback_url, admins)
 
 #for getting the code contained in the callback url
 def get_oauth2_code(app, acc, cb_url, au_url):
@@ -96,7 +97,7 @@ def cmd_poll(client, executor, msgid):
         cmdline = "fswebcam -r %s -q -D 0.5 %s" % (RESOLUTION, imgfile_path)
         subprocess.check_call(cmdline , shell=True)
     except subprocess.CalledProcessError as e:
-        logging.error("exec capture.py error:%s" % e.output)
+        logging.error("exec fswebcam error:%s" % e.output)
 
     statinfo = os.stat(imgfile_path)
     if statinfo.st_ctime < now:
@@ -122,9 +123,9 @@ def cmd_poll(client, executor, msgid):
         temper = u'N/A'
 
     # send one weibo message with pic & @sender
-    message = u"豆芽房间目前温度：{temper}℃  -- {time} {at}".format(
+    message = u"豆芽房间当前温度：{temper}℃  -- {time} {at}".format(
                         temper=temper,
-                        time=time.strftime("%H:%M", time.localtime()),
+                        time=time.strftime("%H点%M分", time.localtime()).decode('utf8'),
                         at=u''.join(executor))
     if imgfile_path is '':
         client.post.statuses__update(status=message)
@@ -138,20 +139,39 @@ def cmd_poll(client, executor, msgid):
 def cmd_ac(on):
     # if there's ac control command
     # send ac ctrl command
+    cmdline = "%s %s" % (AC_CONTROL, on)
+    try:
+        subprocess.check_call(cmdline , shell=True)
+    except subprocess.CalledProcessError as e:
+        logging.error("exec ac-ctrl error:%s" % e.output)
+        return False
     # reply to the command weibo message
-    return 'ok'
+    return True
 
 def cmd_acon(client, executor, msgid):
-    ret = cmd_ac(True)
-    return ret
+    ret = cmd_ac('on')
+    if ret:
+        reply = u'空调已经打开'
+    else:
+        reply = u'空调打开失败'
+    try:
+        client.post.comments__create(comment=u"%s %f" % (reply, random.random()), id=msgid)
+    except APIError as e:
+        logging.error("reply ac on command error: {0}".format(e))
 
 def cmd_acoff(client, executor, msgid):
-    ret = cmd_ac(False)
-    return ret
+    ret = cmd_ac('off')
+    if ret:
+        reply = u'空调已经关闭'
+    else:
+        reply = u'空调关闭失败'
+    try:
+        client.post.comments__create(comment=u"%s %f" % (reply, random.random()), id=msgid)
+    except APIError as e:
+        logging.error("reply ac off command error: {0}".format(e))
 
 def cmd_kill(client, executor, msgid):
-    logging.info("kill myself on order of {0}".format(u''.join(executor)))
-    return 'ok'
+    logging.info(u"kill myself on order of {0}".format(u''.join(executor)))
 
 def cmd_ping(client, executor, msgid):
     logging.debug("%s is pinging me" % executor)
@@ -160,19 +180,19 @@ def cmd_ping(client, executor, msgid):
 # commands description and handler
 cmds_desc = {
     'poll' : {
-             'pattern': u'豆芽怎么样了',
+             'pattern': u'豆芽呢',
              'desc': u'poll the status',
              'handler': cmd_poll },
     'acon' : {
-             'pattern': u'请开空调',
+             'pattern': u'开空调',
              'desc': u'turn on ac',
              'handler': cmd_acon },
     'acoff': {
-             'pattern': u'请关空调',
+             'pattern': u'关空调',
              'desc': u'turn off ac',
              'handler': cmd_acoff },
     'kill' : {
-             'pattern': u'你可以下岗了',
+             'pattern': u'下岗吧',
              'desc': u'kill myself',
              'handler': cmd_kill },
     'ping' : {
@@ -184,11 +204,11 @@ cmds_desc = {
 def main():
 
     # read the appinfo and account info from file
-    (appinfo, account, callback_url, admin) = read_config()
+    (appinfo, account, callback_url, admins) = read_config()
     logging.info("Get app info: {0}".format(appinfo))
     logging.info("Get account info: {0}".format(account))
     logging.info("Get callback URL: {0}".format(callback_url))
-    logging.info(u"Get Admin account: {0}".format(admin))
+    logging.info(u"Get Admin account: {0}".format(' '.join(admins)))
 
     # getting the authorize url
     client = APIClient(app_key=appinfo['key'], app_secret=appinfo['secret'], redirect_uri=callback_url)
@@ -276,7 +296,7 @@ def main():
                 continue
 
             # filter the commands sent by non admin
-            if (cmd is not 'poll') and (args != admin):
+            if (cmd is not 'poll') and (admins.count(args) == 0):
                 # comment the message
                 deny_comment = u"貌似您不是豆芽主人唉%s" % (emotions[emotion_id])
                 client.post.comments__create(id=msgid, comment=deny_comment)
