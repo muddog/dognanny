@@ -123,7 +123,7 @@ def cmd_poll(client, executor, msgid):
         temper = u'N/A'
 
     # send one weibo message with pic & @sender
-    message = u"豆芽房间当前温度：{temper}℃  -- {time} {at}".format(
+    message = u"[兔子]主人，豆芽房间当前温度：{temper}℃  -- {time} {at}".format(
                         temper=temper,
                         time=time.strftime("%H点%M分", time.localtime()).decode('utf8'),
                         at=u' '.join(executor))
