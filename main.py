@@ -79,7 +79,7 @@ def msg_analysis(msg, nanny):
         if m is not None:
 	    if m.group(1) != nanny:
                 logging.warning("%s has send a wrong msg on %s" % (m.group(1), date))
-                return (t, 0, '', '')
+                return (0, '', '')
             idx = string.find(m.group(2), desc['pattern'])
             if idx == 0:
                 cmd = key
@@ -256,6 +256,7 @@ def main():
         since_id = get_statuses[0]['id']
     logging.debug("Start to get command message from id:%s" % since_id)
 
+    client.post.statuses__update(status=u'要干活了[委屈]')
     # main loop
     while True:
         now = time.time()
